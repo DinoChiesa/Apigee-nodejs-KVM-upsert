@@ -1,0 +1,22 @@
+{
+  "name": "apigee-kvm-upsert",
+  "version": "1.0.0",
+  "description": "demonstrates how to insert or update a KVM entry in Apigee X/hybrid",
+  "type": "module",
+  "main": "apigee-kvm-upsert.js",
+  "scripts": {
+    "start" : "node ./apigee-kvm-upsert.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Dino Chiesa <dchiesa@google.com>",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "child_process": "^1.0.2",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">= 12.22.0",
+    "npm": ">= 8.3.0"
+  }
+}
