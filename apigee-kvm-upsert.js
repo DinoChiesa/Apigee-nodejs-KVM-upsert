@@ -2,25 +2,34 @@
 // ------------------------------------------------------------------
 //
 // created: Fri Dec 15 10:35:37 2023
-// last saved: <2023-December-15 11:49:56>
+// last saved: <2023-December-21 08:00:15>
 
 /* jshint esversion:9, node:true, strict:implied */
 /* global process, console, Buffer */
 
 import fetch from "node-fetch";
+import path from "path";
 import { parseArgs } from "node:util";
 import { execSync } from "child_process";
-import os from "os";
 
-const getGcpAccessToken = (runningOutsideOfGoogleCloud) => {
-  if (runningOutsideOfGoogleCloud) {
-    const access_token = execSync("gcloud auth print-access-token", {
+let verbose = false;
+
+const getGcpAccessToken = (getTokenFromComuteMetadata) => {
+  if (!getTokenFromComuteMetadata) {
+    const cmd = "gcloud auth print-access-token";
+    if (verbose) {
+      console.log(`executing '${cmd}'`);
+    }
+    const access_token = execSync(cmd, {
       encoding: "utf-8"
     }).trim();
     const url = `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${access_token}`,
       method = "GET",
       headers = {},
       body = null;
+    if (verbose) {
+      console.log(`${method} ${url}`);
+    }
 
     return fetch(url, { method, headers, body })
       .then(async (res) => [res.status, await res.json()])
@@ -37,6 +46,9 @@ const getGcpAccessToken = (runningOutsideOfGoogleCloud) => {
     headers = { "Metadata-Flavor": "Google" },
     body = null;
 
+  if (verbose) {
+    console.log(`${method} ${url}`);
+  }
   return fetch(url, { method, headers, body })
     .then(async (res) => [res.status, await res.json()])
     .then(([status, payload]) => {
@@ -55,46 +67,69 @@ const upsertKvmEntry = async ({
   kvm,
   entryname,
   entryvalue,
-  dev
+  cloudtoken
 }) => {
-  const tokenPayload = await getGcpAccessToken(dev);
+  const tokenPayload = await getGcpAccessToken(cloudtoken);
 
-  const url = `https://apigee.googleapis.com/v1/organizations/${org}/environments/${env}/keyvaluemaps/${kvm}/entries`,
+  const collectionUrl = `https://apigee.googleapis.com/v1/organizations/${org}/environments/${env}/keyvaluemaps/${kvm}/entries`,
+    entryUrl = `${collectionUrl}/${entryname}`,
     headers = {
       Authorization: `Bearer ${tokenPayload.access_token}`
     };
 
   // inquire
   let method = "GET",
-    body = null,
-    response = await fetch(url, { method, headers, body });
+    body = null;
 
-  if (response.status != 200) {
+  if (verbose) {
+    console.log(`${method} ${entryUrl}`);
+  }
+  let response = await fetch(entryUrl, { method, headers, body });
+
+  if (response.status != 200 && response.status != 404) {
+    // Possible reasons:
+    // - KVM Mapname is incorrect,
+    // - lack of access,
+    // - environment is incorrect,
+    // - ...
     return new Error(`cannot inquire KVM (status: ${response.status})`);
   }
 
+  // 200 = it exists
+  // 404 = it does not exist
   let data = await response.json();
-  if (data.keyValueEntries.find((entry) => entry.name == entryname)) {
-    // must delete first
-    const url2 = `${url}/${entryname}`;
+
+  const needDelete = response.status == 200 && data.value != entryvalue;
+  const needInsert = response.status == 404 || needDelete;
+  if (!needInsert) {
+    return data;
+  }
+
+  // First, conditionally delete the entry.
+  if (needDelete) {
     method = "DELETE";
-    response = await fetch(url2, { method, headers, body });
+    if (verbose) {
+      console.log(`${method} ${entryUrl}`);
+    }
+    response = await fetch(entryUrl, { method, headers, body });
     if (response.status != 200) {
       return new Error(
         `cannot delete existing KVM entry (status: ${response.status})`
       );
     }
-    //console.log(await response.text());
   }
 
-  // now insert
+  // Now, insert the entry
   method = "POST";
   headers["content-type"] = "application/json";
   body = JSON.stringify({
     name: entryname,
     value: entryvalue
   });
-  response = await fetch(url, { method, headers, body });
+  if (verbose) {
+    console.log(`${method} ${collectionUrl}`);
+  }
+  response = await fetch(collectionUrl, { method, headers, body });
   if (response.status != 201) {
     return new Error(
       `cannot insert new KVM entry (status: ${response.status})`
@@ -109,45 +144,84 @@ const options = {
   org: {
     type: "string",
     short: "o",
-    required: true
+    required: true,
+    help: "the Apigee organization"
   },
   env: {
     type: "string",
     short: "e",
-    required: true
+    required: true,
+    help: "the Apigee environment"
   },
   kvm: {
     type: "string",
     short: "k",
-    required: true
+    required: true,
+    help: "the name of the Apigee environment-scoped KeyValueMap to update"
   },
   entryname: {
     type: "string",
     short: "n",
-    required: true
+    required: true,
+    help: "the name of the entry within the KeyValueMap to update"
   },
   entryvalue: {
     type: "string",
     short: "v",
-    required: true
+    required: true,
+    help: "the value of the KeyValueMap entry to apply"
   },
-  dev: {
+  cloudtoken: {
     type: "boolean",
-    short: "d",
-    required: false
+    short: "C",
+    required: false,
+    help: "whether to use the metadata.google.internal endpoint to get a token. Default: use `gcloud auth print-access-token`"
+  },
+  verbose: {
+    type: "boolean",
+    short: "V",
+    required: false,
+    help: "verbose mode"
+  },
+  help: {
+    type: "boolean",
+    short: "h",
+    required: false,
+    help: "print this message"
   }
+};
+
+const printHelp = () => {
+  const helptext = Object.keys(options)
+    .map((name) => {
+      const basetext =
+        options[name].type == "boolean"
+          ? `--${name}, -${options[name].short}`
+          : `--${name} ARG, -${options[name].short} ARG`;
+      return `  ${basetext} : ${options[name].help}`;
+    })
+    .join("\n");
+  const scriptname = process.argv[1].split(path.sep).slice(-1);
+  console.log(`\n${scriptname}: Upsert into an Apigee KVM\n`);
+  console.log(`Options:`);
+  console.log(helptext + "\n");
 };
 
 const { values } = parseArgs({ options });
 
-const missing = Object.keys(options).filter(
-  (name) => options[name].required && !(name in values)
-);
-if (missing.length) {
-  const msg = missing.map((e) => `--${e}`).join(", ");
-  throw new Error(`missing arguments: ${msg}`);
+if (values.help) {
+  printHelp();
+} else {
+  verbose = values.verbose;
+  const missing = Object.keys(options).filter(
+    (name) => options[name].required && !(name in values)
+  );
+  if (missing.length) {
+    const msg = missing.map((e) => `--${e}`).join(", ");
+    printHelp();
+    throw new Error(`missing arguments: ${msg}`);
+  }
+
+  const data = await upsertKvmEntry(values);
+  console.log(data);
 }
-
-const data = await upsertKvmEntry(values);
-
-console.log(data);
